@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<head>
+  <meta charset="utf-8">
+  <title>Weather Chart</title>
+  <meta name="description" content="See how recent weather compares to the historical record. Coverage for almost 1,000 weather stations in Canada. Based on a New York Times graphic.">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.6/d3.js"></script>
+  <script src="queue.js"></script>
+  <script src="http://code.jquery.com/jquery-1.10.2.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/handlebars.js/4.0.4/handlebars.min.js"></script>
+  <script src="typeahead.bundle.min.js"></script>
+  <link rel="stylesheet" href="typeahead.css">
+  <link rel="stylesheet" type="text/css" href="weather_chart.css"/>
+  <script>
+    (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+    (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+    m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+    })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+    ga('create', 'UA-59457353-1', 'auto');
+    ga('send', 'pageview');
+
+  </script>
+</head>
+
+<body>
+  <h1 class='my-title'>Weather Chart</h1>
+  <div class='xcontainer'>
+    
+    <div id="search-div">
+        <input class="typeahead form-control" type="text" placeholder="Search for a Canadian weather station">
+    </div>
+    
+    <div class='desc'>
+      <span class='heading'>Temperature</span>
+      <span>Bars represent the range between the daily high and low. </span>
+    </div>
+  
+    <svg class='temperature-chart'></svg>
+    
+    <div class='desc'><span class='heading'>Rain</span>
+      <span>Cumulative actual monthly rainfall in 2014 compared to normal. </span>
+    </div>
+    
+    <svg class='rain-chart'></svg>
+    
+    <div class='desc'><span class='heading'>Snow</span>
+      <span>Cumulative actual monthly snowfall in 2014 compared to normal. </span>
+    </div>
+    
+    <svg class='snow-chart'></svg>
+
+    <div>
+     <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-nc-sa/4.0/88x31.png" /></a><br /><span xmlns:dct="http://purl.org/dc/terms/" href="http://purl.org/dc/dcmitype/InteractiveResource" property="dct:title" rel="dct:type">Weather Chart</span> by <a xmlns:cc="http://creativecommons.org/ns#" href="http://stephenmcmurtry.org/" property="cc:attributionName" rel="cc:attributionURL">Stephen McMurtry</a> is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-nc-sa/4.0/">Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License</a>.<br />Based on the New York Times weather chart: <a xmlns:dct="http://purl.org/dc/terms/" href="http://www.edwardtufte.com/bboard/q-and-a-fetch-msg?msg_id=00014g" rel="dct:source">http://www.edwardtufte.com/bboard/q-and-a-fetch-msg?msg_id=00014g</a>.
+    </div>
+
+  </div>
+
+</body>
+
+<script>
+
+var data_path = '../data/';
+// var data_path = 'dir_weather_chart/';
+
+var width, day_width;
+
+var precip_months = [],
+    stn_name_dict = {};
+
+var margin_right = 70, 
+    margin_left = 60,
+    axis_strokewidth = 4,
+    x_label_height = -25,
+    y_label_translate = 8,
+    max_p_ticks = 4,
+    text_offset_y = 5,
+    font_size = +d3.select('body').style('font-size').slice(0, -2),
+    parseDate1 = d3.time.format("%Y-%m-%d").parse,
+    marginT = {top: 30, bottom: 5},
+    heightT = 400//0.45*window.innerHeight - marginT.top - marginT.bottom,
+    marginP = {top: 30, bottom: 50},
+    heightP = 100//0.20*window.innerHeight - marginP.top - marginP.bottom; 
+
+if (window.innerWidth >= 1200) {
+  width = 0.95*window.innerWidth - margin_left - margin_right; 
+} else {
+  width = 1200;
+}
+
+queue()
+  .defer(d3.csv, data_path + "station_even_shorterlist.csv")
+  .defer(d3.json, data_path + "stn_id_dict.json")
+  .await(init_search_bar);
+
+var T = d3.scale.linear().range([heightT, 0]);
+var R = d3.scale.linear().range([heightP, 0]);
+var S = d3.scale.linear().range([heightP, 0]);
+var x = d3.time.scale().range([0, width]);
+
+var tAxis = d3.svg.axis().tickSize(0)
+  .tickFormat(function(d) { return d + '℃'; });
+
+var sAxis = d3.svg.axis().scale(S)
+  .tickSize(0)
+  .ticks(max_p_ticks)
+  .tickFormat(function(d) { return d + ' cm'; });
+var rAxis = d3.svg.axis().scale(R)
+  .tickSize(0)
+  .ticks(max_p_ticks)
+  .tickFormat(function(d) { return d + ' mm'; });
+
+var xAxis = d3.svg.axis().scale(x)
+  .orient("bottom").tickSize(0)
+  .tickFormat(x_formatter);
+
+var svgT = create_svg('.temperature-chart', heightT, marginT);
+var svgR = create_svg('.rain-chart', heightP, marginP);
+var svgS = create_svg('.snow-chart', heightP, marginP);
+
+function create_svg(class_name, height, margin) {
+  var svg = d3.select(class_name)
+    .attr("width", width + margin_left + margin_right)
+    .attr("height", height + margin.top + margin.bottom)
+    .append("g")
+    .attr("transform", "translate(" + margin_left + "," + margin.top + ")");
+  return svg;
+}
+
+function init_search_bar(error, station_list, stn_id_dict) {
+  
+  station_list.forEach(function(d) {
+    stn_name_dict[d.station_id] = d.name;
+  });
+
+  var station_name = new Bloodhound({
+    local: station_list,
+    queryTokenizer: Bloodhound.tokenizers.whitespace,
+    datumTokenizer: Bloodhound.tokenizers.obj.whitespace('name')
+  });
+
+  $('.typeahead').typeahead(null, {
+    name: 'name',
+    display: 'name',
+    source: station_name,
+    templates: {
+      empty: [
+        '<div class="empty-message">',
+          'unable to find any weather stations that match the current query',
+        '</div>'
+      ].join('\n'),
+      suggestion: Handlebars.compile('<div><strong>{{name}}</strong> – {{province}}</div>')
+    }
+  });
+
+  $('.typeahead').bind('typeahead:select', function(ev, suggestion) {
+
+    load_files_and_plot(suggestion.station_id);
+    window.location.hash = suggestion.station_id;
+    // console.log(suggestion);
+  })
+
+  // go to hash state
+  if (window.location.hash) {
+    try {
+      var hashed_stn_id = window.location.hash.slice(1);
+      load_files_and_plot(hashed_stn_id);
+    } catch (e) {
+      // console.log('error: ', e);
+    }
+  } else {
+    var default_stn_id = '5051';
+    load_files_and_plot(default_stn_id);
+  }
+
+  function load_files_and_plot(stn_id) {
+    var stn_id_almanac = stn_id_dict[stn_id].stn_id_almanac;
+    var stn_id_normals = stn_id_dict[stn_id].stn_id_normals;
+
+    queue()
+      .defer(d3.csv, data_path + "daily_weather_filled/" + stn_id + ".csv")
+      .defer(d3.csv, data_path + "almanac/" + stn_id_almanac + ".csv")
+      .defer(d3.csv, data_path + "normals/" + stn_id_normals + ".csv")
+      .await(ready_to_plot);
+    // console.log(stn_id_almanac)
+    d3.select('.my-title').html('Weather Chart for ' + stn_name_dict[stn_id]);
+
+  }
+}
+
+
+function ready_to_plot(error, daily_weather, almanac, normals) {
+  if (error) { console.log('Error', error)};
+
+  // console.log()
+
+  svgT.selectAll('g, rect').remove();
+  svgS.selectAll('g, text, path, line').remove();
+  svgR.selectAll('g, text, path, line').remove();
+
+  precip_months, daily_weather = parse_data(daily_weather, normals);
+
+  almanac.forEach(function(d) {
+    d.date = new Date(2014, +d.month-1, +d.day);
+  });
+
+  x.domain([new Date(2014, 0, 1), new Date(2015, 0, 1)]);
+
+  var maxT = d3.max(almanac, function(d) { return +d.T_max; }); // == +d.T_max ? +d.T_max : 0; });
+  var minT = d3.min(almanac, function(d) { return +d.T_min; }); // == +d.T_min ? +d.T_min : 0; });
+  T.domain([minT, maxT]);
+  // console.log([minT, maxT])
+  tAxis.scale(T);
+
+  var maxS1 = d3.max(normals, function(d) { return +d.h_snow_cm; });
+  var maxS2 = d3.max(daily_weather, function(d) { return +d.cumulative_snow; });
+  S.domain([0, d3.max([maxS1, maxS2])]);
+  sAxis.scale(S);
+  
+  var maxR1 = d3.max(normals, function(d) { return +d.h_rain_mm; });
+  var maxR2 = d3.max(daily_weather, function(d) { return +d.cumulative_rain; });
+  R.domain([0, d3.max([maxR1, maxR2])]);
+  rAxis.scale(R);
+
+  day_width = x(daily_weather[1].date) - x(daily_weather[0].date); 
+
+  draw_temperature_chart(almanac, daily_weather);
+
+  update_T_tick_lines();
+
+  draw_precip_chart(svgR, rAxis, R, 'cumulative_rain', 'avg_total_rain', 'h_rain_mm', daily_weather, normals);
+  draw_precip_chart(svgS, sAxis, S, 'cumulative_snow', 'avg_total_snow', 'h_snow_cm', daily_weather, normals);
+
+  // update_x_tick_lines_T();
+
+  shift_x_tick_labels();
+  add_legend();
+  d3.selectAll(".y.axis").attr("stroke-width", axis_strokewidth);
+
+}
+
+// --------------------------------------------------------------------------------
+// Lots of functions
+// --------------------------------------------------------------------------------
+
+function parse_data(daily_weather, precipitation) {
+
+  precip_months = [];
+  var cumulative_snow = 0,
+      cumulative_rain = 0,
+      precip_month = [],
+      first_day_flag = true;
+
+  daily_weather.forEach(function(d) {
+    d.date = parseDate1(d.date);
+    d.h_snow = +d.h_snow;
+    d.h_rain = +d.h_rain;
+    
+    if (d.date.getDate() == 1 && !first_day_flag) {
+      cumulative_snow = 0; 
+      cumulative_rain = 0; 
+      precip_months.push(precip_month);
+      precip_month = [];
+    }
+
+    first_day_flag = false;
+    cumulative_snow += d.h_snow;
+    cumulative_rain += d.h_rain;
+    d.cumulative_snow = cumulative_snow/10.;
+    d.cumulative_rain = cumulative_rain;
+    precip_month.push({'date': d.date, 
+      'cumulative_snow': cumulative_snow/10., 
+      'cumulative_rain': cumulative_rain, 
+      'avg_total_snow': precipitation[d.date.getMonth()].h_snow_cm, 
+      'avg_total_rain': precipitation[d.date.getMonth()].h_rain_mm});
+  });
+
+  precip_months.push(precip_month);
+
+  return precip_months, daily_weather
+}
+
+function draw_temperature_chart(almanac, daily_weather) {
+  svgT.append("g")
+    .attr("class", "x axis")
+    .attr("transform", "translate(0," + x_label_height + ")")
+    .call(xAxis);
+
+  svgT.selectAll('.maxmin')
+    .data(almanac)
+    .enter()
+    .append('rect')
+    .attr('class', 'maxmin')
+    .attr('x', function(d) { return x(d.date); })
+    .attr('y', function(d) { return T(+d.T_max); })
+    .attr('width', day_width)
+    .attr('height', function(d) { return T(+d.T_min) - T(+d.T_max); });
+
+  svgT.selectAll('.avg')
+    .data(almanac)
+    .enter()
+    .append('rect')
+    .attr('class', 'avg')
+    .attr('x', function(d) { return x(d.date); })
+    .attr('y', function(d) { return T(+d.T_high_avg); })
+    .attr('width', day_width)
+    .attr('height', function(d) { return T(+d.T_low_avg) - T(+d.T_high_avg); });
+
+  svgT.selectAll('.weather')
+    .data(daily_weather)
+    .enter()
+    .append('rect')
+    .attr('class', 'weather')
+    .attr('x', function(d) { return x(d.date); })
+    .attr('y', function(d) { 
+      // console.log(d.T_high)
+      return T(+d.T_high); 
+    })
+    .attr('width', day_width)
+    .attr('height', function(d) { return T(+d.T_low) - T(+d.T_high); });
+
+  svgT.append('rect')
+    .attr('class', 'masking')
+    .attr('x', width)
+    .attr('y', -marginT.top)
+    .attr('width', margin_right)
+    .attr('height', heightT + marginT.top)
+  
+  update_x_tick_lines_T();
+
+  add_y_axes(svgT, tAxis);
+}
+
+function draw_precip_chart(svg, yAxis, y, cumulative_precip, y_prop_avg, h_precip, daily_weather, precipitation) {
+  svg.append("g")
+    .attr("class", "x axis")
+    .attr("transform", "translate(0," + heightP + ")")
+    .call(xAxis);
+
+  var area = d3.svg.area()
+    .x(function(d) { return x(d.date) + day_width/2; })
+    .y0(heightP)
+    .y1(function(d) { return y(d[cumulative_precip]); });
+
+  var line = d3.svg.line()
+    .x(function(d) { return x(d.date) + day_width/2; })
+    .y(function(d) { return y(d[cumulative_precip]); });
+
+  var avg_line = d3.svg.line()
+    .x(function(d) { return x(d.date) + day_width/2; })
+    .y(function(d) { return y(+d[y_prop_avg]); });
+
+  svg.selectAll('.area')
+    .data(precip_months)
+    .enter()
+    .append("path")
+    .attr("class", "area")
+    .attr("d", area);
+
+  update_tick_lines(svg, yAxis, y);
+
+  svg.selectAll('.p-line')
+    .data(precip_months)
+    .enter()
+    .append("path")
+    .attr("class", "p-line")
+    .attr("d", line);
+
+  svg.selectAll('.a-line')
+    .data(precip_months)
+    .enter()
+    .append("path")
+    .attr("class", "a-line")
+    .attr("d", avg_line);
+
+  svg.append('rect')
+    .attr('class', 'masking')
+    .attr('x', width)
+    .attr('y', -marginP.top)
+    .attr('width', margin_right)
+    .attr('height', heightP + marginP.top + marginP.bottom);
+
+  update_x_tick_lines_P(svg);
+
+  add_y_axes(svg, yAxis);
+
+  update_axis_ticks(svg, yAxis, y);
+
+  add_precip_text(svg, daily_weather, precipitation, y, h_precip, cumulative_precip);
+
+}
+
+function add_precip_text(svg, daily_weather, precipitation, y, h_precip, cumulative_precip) {
+
+  var actual_text_g = svg.selectAll('.actual-text')
+    .data(daily_weather)
+    .enter()
+    .append('g')
+    .attr('class', 'actual-text');
+
+  actual_text_g.append('text')
+    .attr('class', 'text-for-width-calc')
+    .attr('display', 'block')
+    .attr('fill', 'white')
+    .attr('x', -1000) // out of frame
+    .text(function(d) { return d3.round(+d[cumulative_precip], 1); })
+    .each(function(d) { d.width = this.getBBox().width; });
+
+  actual_text_g.append('rect')
+    .attr('display', function(d) { return isLastDay(d.date) ? 'block' : 'none'; })
+    .attr('x', function(d) { return d.date.getDate() > 15 ? x(d.date) - d.width : x(d.date); })
+    .attr('y', function(d) { return y(+d[cumulative_precip]) - text_offset_y - font_size; })
+    .attr('width', function(d) { return d.width; })
+    .attr('height', font_size)
+    .attr('fill', 'white');
+
+  actual_text_g.append('text')
+    .attr('x', function(d) { return x(d.date); })
+    .attr('y', function(d) { return y(+d[cumulative_precip]) - text_offset_y; })
+    .attr('display', function(d) { return isLastDay(d.date) ? 'block' : 'none'; })
+    .attr('text-anchor', function(d) { return d.date.getDate() > 15 ? 'end' : 'start'; })
+    .text(function(d) { return d3.round(+d[cumulative_precip], 1); });
+
+  svg.selectAll('.normal-text')
+    .data(precipitation)
+    .enter()
+    .append('text')
+    .attr('x', function(d) { return x(new Date(2014, +d.month-1, 1)) + day_width; })
+    .attr('y', function(d) { return y(+d[h_precip]) - text_offset_y; })
+    .attr('font-style', 'italic')
+    .text(function(d) { return d3.round(+d[h_precip], 1); });
+
+  svg.append('text')
+    .attr('x', x(new Date(2014, 0, 1)) + day_width)
+    .attr('y', y(+precipitation[0][h_precip]) - text_offset_y - font_size)
+    .attr('font-style', 'italic')
+    .text('Normal');
+
+  var text_w_actual = 38;
+
+  svg.append('rect')
+    .attr('x', x(new Date(2014, 0, 31)) - text_w_actual)
+    .attr('y', y(+precip_months[0][precip_months[0].length - 1][cumulative_precip]) - text_offset_y - 2*font_size)
+    .attr('width', text_w_actual)
+    .attr('height', font_size)
+    .attr('fill', 'white');
+
+  svg.append('text')
+    .attr('x', x(new Date(2014, 0, 31)))
+    .attr('y', y(+precip_months[0][precip_months[0].length - 1][cumulative_precip]) - text_offset_y - font_size)
+    .attr('text-anchor', 'end')
+    .text('Actual');
+
+}
+
+function add_legend() {
+  var tot_h = 100,
+      text_margin_1 = 5,
+      legend_line_len = 20,
+      legend_line_w = 1;
+
+  var legend = svgT.append('g')
+    .attr('class', 'legend')
+    .attr("transform", "translate(" + (width/2 + 50) + "," + (0.70*heightT) + ")");
+    
+  var rect_data = [{'class': 'legend-background', 'w': 2*tot_h + 10, 'h': tot_h + 2.5*font_size, 'x': -tot_h - 10, 'y': -font_size},
+                   {'class': 'legend-maxmin', 'w': day_width*2, 'h': tot_h, 'x': 0, 'y': 0},
+                   {'class': 'legend-avg', 'w': day_width*2, 'h': tot_h/2, 'x': 0, 'y': tot_h/4},
+                   {'class': 'legend-weather', 'w': day_width, 'h': tot_h/2, 'x': day_width/2, 'y': tot_h/3}
+                  ];
+
+  legend.selectAll('rect')
+    .data(rect_data)
+    .enter()
+    .append('rect')
+    .attr('width', function(d) { return d.w; })
+    .attr('height', function(d) { return d.h; })
+    .attr('x', function(d) { return d.x; })
+    .attr('y', function(d) { return d.y; })
+    .attr('class', function(d) { return d.class; });
+
+
+  var text_data = [{'text': 'Record High', 'anchor': 'end', 'x': -text_margin_1, 'y': font_size/2},
+                   {'text': 'Record Low', 'anchor': 'end', 'x': -text_margin_1, 'y': tot_h + font_size/2},
+                   {'text': 'Actual High', 'anchor': 'start', 'x': legend_line_len + text_margin_1/2, 'y': tot_h/3 + font_size/2},
+                   {'text': 'Actual Low', 'anchor': 'start', 'x': legend_line_len + text_margin_1/2, 'y': tot_h/3 + tot_h/2 - 2*legend_line_w + font_size/2},
+                   {'text': 'Normal Range', 'anchor': 'end', 'x': -15, 'y': tot_h/2 + font_size/2}
+                  ];
+
+  legend.selectAll('text')
+    .data(text_data)
+    .enter()
+    .append('text')
+    .text(function(d) { return d.text; })
+    .attr('text-anchor', function(d) { return d.anchor; })
+    .attr('x', function(d) { return d.x; })
+    .attr('y', function(d) { return d.y; });
+
+
+  var line_data = [{'x1': day_width*1.7, 'x2': legend_line_len, 'y1': tot_h/3 + legend_line_w, 'y2': tot_h/3 + legend_line_w},
+                   {'x1': day_width*1.7, 'x2': legend_line_len, 'y1': tot_h/3 + tot_h/2 - legend_line_w, 'y2': tot_h/3 + tot_h/2 - legend_line_w},
+                   {'x1': -5, 'x2': -10, 'y1': tot_h/4 + legend_line_w, 'y2': tot_h/4 + legend_line_w},
+                   {'x1': -5, 'x2': -10, 'y1': 3*tot_h/4 - legend_line_w, 'y2': 3*tot_h/4 - legend_line_w},
+                   {'x1': -10, 'x2': -10, 'y1': tot_h/4 + legend_line_w, 'y2': 3*tot_h/4 - legend_line_w}
+                   ];
+
+  legend.selectAll('line')
+    .data(line_data)
+    .enter()
+    .append('line')
+    .attr('class', 'legend-line')
+    .attr('x1', function(d) { return d.x1; })
+    .attr('x2', function(d) { return d.x2; })
+    .attr('y1', function(d) { return d.y1; })
+    .attr('y2', function(d) { return d.y2; });
+}
+
+function add_y_axes(svg, axis) {
+  svg.append("g")
+    .attr("class", "y axis")
+    .attr("transform", "translate(" + (-axis_strokewidth/2) + ",0)")
+    .call(axis.orient("left"))
+    .selectAll('text')
+    .attr("transform", "translate(" + (-y_label_translate) + ",0)");
+
+  svg.append("g")
+    .attr("class", "y axis")
+    .attr("transform", "translate(" + (width+axis_strokewidth/2) + ",0)")
+    .call(axis.orient("right"))
+    .selectAll('text')
+    .attr("transform", "translate(" + y_label_translate + ",0)");
+}
+
+function isLastDay(dt) {
+    return new Date(dt.getTime() + 86400000).getDate() === 1;
+}
+
+function update_T_tick_lines() {
+  svgT.selectAll(".T-tick-line").remove();
+
+  var T_ticks = tAxis.scale().ticks(tAxis.ticks()[0]);
+  var tick_ln = svgT.selectAll(".T-tick-line").data(T_ticks);
+  
+  tick_ln.enter().append("line").attr("class", "T-tick-line");
+
+  svgT.selectAll(".T-tick-line")
+    .attr("y1", function(d) { return T(d); } )
+    .attr("y2", function(d) { return T(d); } )
+    .attr("x1", width+day_width+axis_strokewidth)
+    .attr("x2", -axis_strokewidth)
+}
+
+function update_tick_lines(svg, yAxis, y) {
+  svg.selectAll(".P-tick-line").remove();
+
+  var y_ticks = yAxis.scale().ticks(yAxis.ticks()[0]);
+  var tick_ln = svg.selectAll(".P-tick-line").data(y_ticks);
+  
+  tick_ln.enter().append("line").attr("class", "P-tick-line");
+
+  svg.selectAll(".P-tick-line")
+    .attr("y1", function(d) { return y(d); } )
+    .attr("y2", function(d) { return y(d); } )
+    .attr("x1", width+day_width+axis_strokewidth)
+    .attr("x2", -axis_strokewidth)
+}
+
+function update_axis_ticks(svg, yAxis, y) {
+
+  svg.selectAll(".axis-tick-1").remove();
+  svg.selectAll(".axis-tick-2").remove();
+
+  var y_ticks = yAxis.scale().ticks(yAxis.ticks()[0]);
+  var tick_ln_1 = svg.selectAll(".axis-tick-1").data(y_ticks);
+  var tick_ln_2 = svg.selectAll(".axis-tick-2").data(y_ticks);
+  
+  tick_ln_1.enter().append("line").attr("class", "axis-tick-1");
+  tick_ln_2.enter().append("line").attr("class", "axis-tick-2");
+
+  svg.selectAll(".axis-tick-1")
+    .attr("y1", function(d) { return y(d); } )
+    .attr("y2", function(d) { return y(d); } )
+    .attr("x1", 2*axis_strokewidth)
+    .attr("x2", -axis_strokewidth);
+
+  svg.selectAll(".axis-tick-2")
+    .attr("y1", function(d) { return y(d); } )
+    .attr("y2", function(d) { return y(d); } )
+    .attr("x1", width+2*axis_strokewidth)
+    .attr("x2", width-axis_strokewidth)
+}
+
+function update_x_tick_lines_T() {
+  var x_ticks = xAxis.scale().ticks(xAxis.ticks()[0]);
+  var tick_ln = svgT.selectAll(".x-tick-line").data(x_ticks);
+  
+  tick_ln.enter().append("line").attr("class", "x-tick-line");
+  tick_ln.exit().remove();
+
+  svgT.selectAll(".x-tick-line")
+    .attr("x1", function(d) { return x(d); } )
+    .attr("x2", function(d) { return x(d); } )
+    .attr("y1", heightT)
+    .attr("y2", 0);
+}
+
+function update_x_tick_lines_P(svg) {
+  var x_ticks = xAxis.scale().ticks(xAxis.ticks()[0]);
+  var tick_ln = svg.selectAll(".x-tick-line").data(x_ticks);
+  
+  tick_ln.enter().append("line").attr("class", "x-tick-line");
+  tick_ln.exit().remove();
+
+  svg.selectAll(".x-tick-line")
+    .attr("x1", function(d) { return x(d); } )
+    .attr("x2", function(d) { return x(d); } )
+    .attr("y1", heightP)
+    .attr("y2", 0)
+}
+
+function shift_x_tick_labels() {
+  var x_ticks = xAxis.scale().ticks(xAxis.ticks()[0]);
+  var x_division_w = x(x_ticks[1]) - x(x_ticks[0]);
+
+  d3.selectAll('.x.axis .tick text')
+    .attr("transform", "translate(" + (x_division_w/2) + ",0)")
+}
+
+function x_formatter(d) {
+  var month_names = ["January", "February", "March", "April", "May", "June", 
+    "July", "August", "September", "October", "November", "December"];
+
+  if (d.getMonth() == 0) { 
+    return month_names[d.getMonth()] + ' ' + d.getFullYear(); 
+  }
+  
+  return month_names[d.getMonth()];
+}
+
+</script>
